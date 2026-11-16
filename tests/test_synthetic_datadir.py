@@ -87,5 +87,6 @@ def test_synthetic_datadir_enables_fff_models_outside_the_user_directory(synthet
     assert any(line.startswith("model:MK4S = ") and "0.4" in line.split("=", 1)[1] for line in model_lines)
     assert any(line.startswith("model:MK3SMMU2S = ") for line in model_lines)
     assert (synthetic_datadir / "vendor" / "PrusaResearch.ini").is_file()
-    assert not (synthetic_datadir / "physical_printer").exists()
+    # PrusaSlicer creates this empty directory once it runs. A copied printer would be a file inside it.
+    assert list((synthetic_datadir / "physical_printer").rglob("*")) == []
     assert oct((synthetic_datadir / "PrusaSlicer.ini").stat().st_mode & 0o777) == "0o600"
