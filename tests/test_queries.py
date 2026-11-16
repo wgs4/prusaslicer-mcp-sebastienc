@@ -255,6 +255,83 @@ async def test_list_profiles_maps_print_profiles_and_their_filaments(prusaslicer
     ]
 
 
+async def test_list_printers_includes_a_user_preset_once_including_models_without_variants(prusaslicer_query):
+    # Given a vendor profile that is repeated as a user preset, a distinct user preset, and a model
+    # that has no nozzle variants (PrusaSlicer 2.9 puts its profiles on the model itself)
+    prusaslicer_query.state.payload = {
+        "printer_models": [
+            {
+                "id": "MAKER",
+                "name": "Maker",
+                "variants": [
+                    {
+                        "name": 0.4,
+                        "printer_profiles": [
+                            {
+                                "name": "Maker One 0.4",
+                                "extruders_cnt": 1,
+                                "bed": {"width": 200, "height": 150, "max_print_height": 100},
+                            }
+                        ],
+                        "user_printer_profiles": [
+                            {"name": "Maker One 0.4", "bed": {"width": 1, "height": 1, "max_print_height": 1}},
+                            {
+                                "name": "Shop",
+                                "extruders_cnt": 1,
+                                "bed": {"width": 220, "height": 220, "max_print_height": 250},
+                            },
+                        ],
+                    }
+                ],
+            },
+            {
+                "id": "FLAT",
+                "name": "Flat",
+                "user_printer_profiles": [
+                    {
+                        "name": "Flat User",
+                        "extruders_cnt": 1,
+                        "bed": {"width": 100, "height": 80, "max_print_height": 40},
+                    }
+                ],
+            },
+        ]
+    }
+
+    # When the printers are listed
+    printers = {p.id: p for p in await server.list_printers()}
+
+    # Then the duplicated name is listed once, with the vendor bed, and the variant-less user preset is included
+    assert [v.printer_profile for v in printers["MAKER"].variants] == ["Maker One 0.4", "Shop"]
+    assert printers["MAKER"].variants[0].bed_width == 200
+    flat = printers["FLAT"].variants[0]
+    assert flat.printer_profile == "Flat User"
+    assert (flat.bed_width, flat.bed_depth, flat.max_print_height) == (100, 80, 40)
+
+
+async def test_list_profiles_merges_user_presets_and_keeps_each_name_once(prusaslicer_query):
+    # Given a print profile that also exists as a user preset, plus a user-only print profile
+    prusaslicer_query.state.payload = {
+        "printer_profile": "Maker One 0.4",
+        "print_profiles": [
+            {"name": "0.20mm SPEED", "filament_profiles": ["PLA"], "user_filament_profiles": ["PLA", "My PLA"]},
+        ],
+        "user_print_profiles": [
+            {"name": "0.20mm SPEED", "filament_profiles": ["PETG"]},
+            {"name": "Shop 0.20mm", "user_filament_profiles": ["Shop PLA"]},
+        ],
+    }
+
+    # When the profiles are listed
+    profiles = await server.list_profiles("Maker One 0.4")
+
+    # Then each print profile name appears once, and filaments from both sources are kept
+    assert [(p.name, p.filament_profiles) for p in profiles.print_profiles] == [
+        ("0.20mm SPEED", ["PLA", "My PLA", "PETG"]),
+        ("Shop 0.20mm", ["Shop PLA"]),
+    ]
+
+
 async def test_list_profiles_echoes_the_requested_printer_when_the_answer_omits_it(prusaslicer_query):
     # Given an answer without the printer_profile field
     prusaslicer_query.state.payload = {"print_profiles": []}
