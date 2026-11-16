@@ -350,15 +350,66 @@ def _display_name(name: str) -> str:
     return name.replace("&&", "&")
 
 
+def _as_list(value: Any) -> list[Any]:
+    """PrusaSlicer uses a list, or omits the key, or writes an empty string when there are none."""
+    return value if isinstance(value, list) else []
+
+
+def _holders(model: dict[str, Any]) -> list[dict[str, Any]]:
+    """Nozzle variants, or the model itself when 2.9 has no `variants` array."""
+    variants = model.get("variants")
+    if isinstance(variants, list) and variants:
+        return [item for item in variants if isinstance(item, dict)]
+    return [model]
+
+
+def _profile_name(item: Any) -> str | None:
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict) and isinstance(item.get("name"), str):
+        return item["name"]
+    return None
+
+
+def _unique_names(values: Any) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in _as_list(values):
+        name = _profile_name(item)
+        if name is None or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def _printer_entries(model: dict[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """System and user printer profiles, each exact name once. The first occurrence wins."""
+    found: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    seen: set[str] = set()
+    for holder in _holders(model):
+        for key in ("printer_profiles", "user_printer_profiles"):
+            for profile in _as_list(holder.get(key)):
+                if not isinstance(profile, dict):
+                    continue
+                name = profile.get("name")
+                if not isinstance(name, str) or name in seen:
+                    continue
+                seen.add(name)
+                found.append((holder, profile))
+    return found
+
+
 async def _bed_size(printer_profile: str) -> tuple[float, float, float]:
     """Width, depth and maximum print height of a known FFF printer profile's bed, in mm."""
     data = await _query_json(["--query-printer-models", "--printer-technology", "FFF"])
-    for m in data.get("printer_models", []):
-        for v in m.get("variants", []):
-            for p in v.get("printer_profiles", []):
-                bed = p.get("bed", {})
-                if p.get("name") == printer_profile and bed.get("width") and bed.get("height"):
-                    return bed["width"], bed["height"], bed.get("max_print_height") or float("inf")
+    for model in _as_list(data.get("printer_models")):
+        if not isinstance(model, dict):
+            continue
+        for _holder, profile in _printer_entries(model):
+            bed = profile.get("bed") or {}
+            if profile.get("name") == printer_profile and bed.get("width") and bed.get("height"):
+                return bed["width"], bed["height"], bed.get("max_print_height") or float("inf")
     raise ToolError(
         f"printer profile {printer_profile!r} was not found with a bed size; use the exact name from list_printers"
     )
@@ -383,21 +434,22 @@ async def list_printers(
         raise ToolError("technology must be 'FFF' or 'SLA'")
     data = await _query_json(["--query-printer-models", "--printer-technology", technology])
     models: list[PrinterModel] = []
-    for m in data.get("printer_models", []):
+    for m in _as_list(data.get("printer_models")):
+        if not isinstance(m, dict):
+            continue
         variants = []
-        for v in m.get("variants", []):
-            for p in v.get("printer_profiles", []):
-                bed = p.get("bed", {})
-                variants.append(
-                    PrinterVariant(
-                        nozzle_diameter=v.get("name"),
-                        printer_profile=p["name"],
-                        extruders=p.get("extruders_cnt"),
-                        bed_width=bed.get("width"),
-                        bed_depth=bed.get("height"),
-                        max_print_height=bed.get("max_print_height"),
-                    )
+        for holder, p in _printer_entries(m):
+            bed = p.get("bed") or {}
+            variants.append(
+                PrinterVariant(
+                    nozzle_diameter=holder.get("name"),
+                    printer_profile=p["name"],
+                    extruders=p.get("extruders_cnt"),
+                    bed_width=bed.get("width"),
+                    bed_depth=bed.get("height"),
+                    max_print_height=bed.get("max_print_height"),
                 )
+            )
         models.append(
             PrinterModel(
                 id=m["id"], name=_display_name(m["name"]), technology=m.get("technology", technology), variants=variants
@@ -422,12 +474,30 @@ async def list_profiles(
 ) -> ProfileList:
     """List the print (quality) profiles and compatible filament profiles for a printer profile."""
     data = await _query_json(["--query-print-filament-profiles", "--printer-profile", printer_profile])
+    # System profiles first, then user presets. The same print-profile name is listed once;
+    # filaments from a later copy are added if that name did not already have them.
+    filaments_for: dict[str, list[str]] = {}
+    order: list[str] = []
+    for key in ("print_profiles", "user_print_profiles"):
+        for profile in _as_list(data.get(key)):
+            if not isinstance(profile, dict) or not isinstance(profile.get("name"), str):
+                continue
+            name = profile["name"]
+            seen = set(filaments_for.get(name, []))
+            extra: list[str] = []
+            for filament_key in ("filament_profiles", "user_filament_profiles"):
+                for filament in _unique_names(profile.get(filament_key)):
+                    if filament not in seen:
+                        seen.add(filament)
+                        extra.append(filament)
+            if name in filaments_for:
+                filaments_for[name].extend(extra)
+            else:
+                filaments_for[name] = extra
+                order.append(name)
     return ProfileList(
         printer_profile=data.get("printer_profile", printer_profile),
-        print_profiles=[
-            PrintProfile(name=p["name"], filament_profiles=p.get("filament_profiles", []))
-            for p in data.get("print_profiles", [])
-        ],
+        print_profiles=[PrintProfile(name=name, filament_profiles=filaments_for[name]) for name in order],
     )
 
 

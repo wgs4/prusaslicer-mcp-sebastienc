@@ -38,9 +38,32 @@ PRINTERS = {
                             "bed": {"width": 250, "height": 210, "max_print_height": 210},
                         }
                     ],
+                    "user_printer_profiles": [
+                        {
+                            "name": "MK3S",
+                            "extruders_cnt": 1,
+                            "bed": {"width": 10, "height": 10, "max_print_height": 10},
+                        },
+                        {
+                            "name": "Shop",
+                            "extruders_cnt": 1,
+                            "bed": {"width": 220, "height": 220, "max_print_height": 250},
+                        },
+                    ],
                 },
             ],
-        }
+        },
+        {
+            "id": "FLAT",
+            "name": "Flat",
+            "user_printer_profiles": [
+                {
+                    "name": "Flat User",
+                    "extruders_cnt": 1,
+                    "bed": {"width": 100, "height": 80, "max_print_height": 40},
+                }
+            ],
+        },
     ]
 }
 
@@ -101,6 +124,31 @@ async def test_center_uses_the_middle_of_a_180_mm_bed(slicer, model):
 
     # Then PrusaSlicer is told to centre on 90,90
     assert centre_passed_to_prusaslicer(slicer) == "90,90"
+
+
+async def test_a_user_printer_preset_is_listed_once_and_centring_uses_its_bed(slicer, model):
+    # Given a user preset "Shop" (220 mm bed) and a user copy of "MK3S" that must not replace the vendor bed
+    names = [variant.printer_profile for printer in await server.list_printers() for variant in printer.variants]
+
+    # When the printers are listed and a model is centred on the user preset
+    await server.mcp.call_tool("slice_model", slice_args(model, printer="Shop", center=True))
+
+    # Then the duplicated name appears once, and centring uses the user preset's own bed
+    assert names.count("MK3S") == 1
+    assert "Shop" in names
+    assert "Flat User" in names
+    assert centre_passed_to_prusaslicer(slicer) == "110,110"
+
+
+async def test_centring_works_for_a_user_preset_on_a_model_without_variants(slicer, model):
+    # Given a user printer preset stored on a model that has no nozzle variants
+    arguments = slice_args(model, printer="Flat User", center=True)
+
+    # When the model is centred on that preset
+    await server.mcp.call_tool("slice_model", arguments)
+
+    # Then the bed middle comes from that preset (100 x 80 mm)
+    assert centre_passed_to_prusaslicer(slicer) == "50,40"
 
 
 async def test_center_follows_the_bed_size_of_the_printer_profile(slicer, model):
