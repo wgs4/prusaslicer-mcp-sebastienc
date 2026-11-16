@@ -1,3 +1,5 @@
+import os
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,12 +28,109 @@ def pytest_collection_modifyitems(items):
             item.add_marker(pytest.mark.integration)
 
 
-@pytest.fixture(scope="session")
-def prusaslicer():
+def fff_model_lines(vendor_text: str) -> list[str]:
+    """One `model:<id> = <variants>` line per FFF printer model.
+
+    Variants are joined with `;` and spaces around that separator are removed. SLA models are left out.
+    PrusaSlicer 2.9 exits with "Configuration wasn't found" when a data directory has no such lines.
+    """
+    lines: list[str] = []
+    model_id: str | None = None
+    technology: str | None = None
+    variants: str | None = None
+
+    def flush() -> None:
+        nonlocal model_id, technology, variants
+        if model_id and technology == "FFF" and variants:
+            parts = [part.strip() for part in variants.split(";") if part.strip()]
+            if parts:
+                lines.append(f"model:{model_id} = {';'.join(parts)}")
+        model_id = None
+        technology = None
+        variants = None
+
+    for raw in vendor_text.splitlines():
+        if raw.startswith("[printer_model:") and raw.endswith("]"):
+            flush()
+            model_id = raw[len("[printer_model:") : -1]
+            continue
+        if raw.startswith("["):
+            flush()
+            continue
+        if model_id is None or "=" not in raw:
+            continue
+        key, value = (piece.strip() for piece in raw.split("=", 1))
+        if key == "technology":
+            technology = value
+        elif key == "variants":
+            variants = value
+    flush()
+    return lines
+
+
+def _vendor_ini(executable: Path) -> Path | None:
+    """The PrusaResearch vendor bundle shipped beside the binary, including a macOS .app bundle.
+
+    A `prusa-slicer` on PATH is often a wrapper, so the standard application location is checked too.
+    """
+    resolved = executable.resolve()
+    candidates = [
+        resolved.parent.parent / "Resources" / "profiles" / "PrusaResearch.ini",
+        resolved.parent / "resources" / "profiles" / "PrusaResearch.ini",
+        Path("/Applications/PrusaSlicer.app/Contents/Resources/profiles/PrusaResearch.ini"),
+        Path.home() / "Applications" / "PrusaSlicer.app" / "Contents" / "Resources" / "profiles" / "PrusaResearch.ini",
+    ]
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
+
+
+def _build_synthetic_datadir(root: Path, executable: Path) -> Path | None:
+    vendor = _vendor_ini(executable)
+    if vendor is None:
+        return None
+    (root / "vendor").mkdir()
+    shutil.copyfile(vendor, root / "vendor" / "PrusaResearch.ini")
+    models = fff_model_lines(vendor.read_text(encoding="utf-8", errors="replace"))
+    ini = root / "PrusaSlicer.ini"
+    ini.write_text("[vendor:PrusaResearch]\n" + "\n".join(models) + "\n", encoding="utf-8")
+    ini.chmod(0o600)
+    return root
+
+
+@pytest.fixture(scope="session", autouse=True)
+def synthetic_datadir(tmp_path_factory):
+    """Use a temporary data directory for the whole session when PrusaSlicer is installed.
+
+    The directory holds the vendor bundle plus a synthetic PrusaSlicer.ini that enables every FFF model.
+    One project test slices a file that names an MK3S MMU printer; the profile fixture names an MK4S.
+    Enabling every FFF model covers both. The user's own data directory is never read or written.
+    """
     try:
-        return find_executable()
+        executable = find_executable()
+    except PrusaSlicerNotFound:
+        yield None
+        return
+    root = _build_synthetic_datadir(tmp_path_factory.mktemp("prusaslicer-datadir"), executable)
+    if root is None:
+        yield None
+        return
+    previous = os.environ.get("PRUSASLICER_DATADIR")
+    os.environ["PRUSASLICER_DATADIR"] = str(root)
+    yield root
+    if previous is None:
+        os.environ.pop("PRUSASLICER_DATADIR", None)
+    else:
+        os.environ["PRUSASLICER_DATADIR"] = previous
+
+
+@pytest.fixture(scope="session")
+def prusaslicer(synthetic_datadir):
+    try:
+        executable = find_executable()
     except PrusaSlicerNotFound:
         pytest.skip("PrusaSlicer not installed")
+    if synthetic_datadir is None:
+        pytest.skip("PrusaSlicer vendor profiles were not found")
+    return executable
 
 
 @pytest.fixture

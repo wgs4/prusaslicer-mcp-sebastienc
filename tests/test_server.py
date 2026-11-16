@@ -1,5 +1,6 @@
 """Integration tests against a real PrusaSlicer install (skipped when absent)."""
 
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,15 +24,26 @@ def _reset_config(prusaslicer, tmp_path, monkeypatch):
     server._config = None
 
 
+# A stock MK4S triple from the PrusaResearch bundle. Fixed names keep the suite off whichever
+# printer a machine lists first, and off presets stored in a user's data directory.
+_KNOWN_PRINTER = "Original Prusa MK4S 0.4 nozzle"
+_KNOWN_PRINT = "0.20mm SPEED @MK4S 0.4"
+_KNOWN_FILAMENT = "Prusament PLA @MK4S"
+
+
 @pytest.fixture
 async def installed():
-    """The first installed printer profile with its first print profile and a compatible filament."""
+    """MK4S 0.4, the 0.20 mm SPEED print profile, and Prusament PLA. Fails if this install lacks them."""
     printers = await server.list_printers()
-    printer = next(v.printer_profile for p in printers for v in p.variants)
-    print_profile = (await server.list_profiles(printer)).print_profiles[0]
-    return SimpleNamespace(
-        printer=printer, print_profile=print_profile.name, filament=print_profile.filament_profiles[0]
+    names = [variant.printer_profile for model in printers for variant in model.variants]
+    assert _KNOWN_PRINTER in names, f"{_KNOWN_PRINTER!r} is not installed"
+    profiles = await server.list_profiles(_KNOWN_PRINTER)
+    print_profile = next((item for item in profiles.print_profiles if item.name == _KNOWN_PRINT), None)
+    assert print_profile is not None, f"{_KNOWN_PRINT!r} is not installed for {_KNOWN_PRINTER!r}"
+    assert _KNOWN_FILAMENT in print_profile.filament_profiles, (
+        f"{_KNOWN_FILAMENT!r} is not compatible with {_KNOWN_PRINT!r}"
     )
+    return SimpleNamespace(printer=_KNOWN_PRINTER, print_profile=_KNOWN_PRINT, filament=_KNOWN_FILAMENT)
 
 
 @pytest.fixture
@@ -383,7 +395,12 @@ async def test_slice_flags_a_model_that_has_an_empty_stretch_in_its_height(tmp_p
     # Then the caller is told layers are missing, and where, from the real G-code's layer markers
     gap_warnings = [w for w in result.warnings if w.startswith("Nothing is printed across")]
     assert len(gap_warnings) == 1
-    assert "between z 10" in gap_warnings[0]
+    # The air is between z 10 and z 20. A substring such as "between z 10" also matches 10.2 and 100,
+    # and misses a marker that landed on 9.95. One layer (0.2 mm) of slack covers that rounding.
+    found = re.search(r"between z ([0-9.]+) and ([0-9.]+) mm", gap_warnings[0])
+    assert found, gap_warnings[0]
+    assert float(found.group(1)) == pytest.approx(10, abs=0.25)
+    assert float(found.group(2)) == pytest.approx(20, abs=0.25)
 
 
 async def test_slice_of_a_plain_cube_reports_no_empty_stretch(cube_stl, installed):
@@ -501,7 +518,13 @@ async def test_a_previews_base_is_the_slices_first_layer_even_where_prusaslicer_
         max(max(m.x0, m.x1) for m in first_layer) - min(min(m.x0, m.x1) for m in first_layer),
         max(max(m.y0, m.y1) for m in first_layer) - min(min(m.y0, m.y1) for m in first_layer),
     )
-    assert printed == pytest.approx(tuple(previewed), abs=1.0)
+    # X/Y in the G-code are extrusion centerlines, so the span is one extrusion width shorter than the
+    # mesh. Elephant-foot compensation (spelled elefant_foot_compensation) insets each side as well.
+    width = float(recorded_setting(sliced, "first_layer_extrusion_width"))
+    foot = float(recorded_setting(sliced, "elefant_foot_compensation"))
+    inset = width + 2 * foot
+    expected = (float(previewed[0]) - inset, float(previewed[1]) - inset)
+    assert printed == pytest.approx(expected, abs=0.15)
 
 
 async def test_scale_doubles_the_height(bar_stl, installed):
