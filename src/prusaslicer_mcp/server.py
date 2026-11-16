@@ -400,28 +400,63 @@ def _printer_entries(model: dict[str, Any]) -> list[tuple[dict[str, Any], dict[s
     return found
 
 
-async def _bed_size(printer_profile: str) -> tuple[float, float, float]:
-    """Width, depth and maximum print height of a known FFF printer profile's bed, in mm."""
+_BED_ORIGIN = re.compile(r"^\[\s*([+-]?\d+(?:\.\d+)?)\s*,\s*([+-]?\d+(?:\.\d+)?)\s*\]$")
+
+
+def _bed_origin(bed: dict[str, Any]) -> tuple[float, float]:
+    """Machine-origin offset of the bed's minimum corner, in mm.
+
+    PrusaSlicer 2.9 writes this as a string, for example "[110, 110]". A missing
+    or unreadable value means the bed starts at zero.
+    """
+    raw = bed.get("origin")
+    if isinstance(raw, str):
+        match = _BED_ORIGIN.match(raw.strip())
+        if match:
+            return float(match.group(1)), float(match.group(2))
+    if isinstance(raw, (list, tuple)) and len(raw) >= 2:
+        try:
+            return float(raw[0]), float(raw[1])
+        except (TypeError, ValueError):
+            return 0.0, 0.0
+    return 0.0, 0.0
+
+
+async def _printer_bed(printer_profile: str) -> dict[str, Any]:
+    """Bed record of a known FFF printer profile, system or user."""
     data = await _query_json(["--query-printer-models", "--printer-technology", "FFF"])
     for model in _as_list(data.get("printer_models")):
         if not isinstance(model, dict):
             continue
         for _holder, profile in _printer_entries(model):
             bed = profile.get("bed") or {}
-            if profile.get("name") == printer_profile and bed.get("width") and bed.get("height"):
-                return bed["width"], bed["height"], bed.get("max_print_height") or float("inf")
+            if (
+                profile.get("name") == printer_profile
+                and isinstance(bed, dict)
+                and bed.get("width")
+                and bed.get("height")
+            ):
+                return bed
     raise ToolError(
         f"printer profile {printer_profile!r} was not found with a bed size; use the exact name from list_printers"
     )
 
 
+async def _bed_size(printer_profile: str) -> tuple[float, float, float]:
+    """Width, depth and maximum print height of a known FFF printer profile's bed, in mm."""
+    bed = await _printer_bed(printer_profile)
+    return bed["width"], bed["height"], bed.get("max_print_height") or float("inf")
+
+
 async def _bed_center(printer_profile: str) -> tuple[float, float]:
-    """Middle of the bed for a known FFF printer profile (assumes the bed origin is a corner)."""
+    """Middle of the bed for a known FFF printer profile, in the printer's own coordinates."""
     try:
-        width, depth, _ = await _bed_size(printer_profile)
+        bed = await _printer_bed(printer_profile)
     except ToolError as e:
         raise ToolError(f"Cannot centre on the bed: {e}") from e
-    return width / 2, depth / 2
+    width, depth = float(bed["width"]), float(bed["height"])
+    origin_x, origin_y = _bed_origin(bed)
+    return width / 2 - origin_x, depth / 2 - origin_y
 
 
 @mcp.tool(annotations=_READ_ONLY)
