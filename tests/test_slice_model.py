@@ -165,6 +165,7 @@ async def test_malformed_override_key_is_refused(fake_prusaslicer, model, key):
         "output",
         "datadir",
         "save",
+        "post_process",
         "printer_profile",
         "print_profile",
         "material_profile",

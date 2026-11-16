@@ -66,8 +66,9 @@ _MODEL_SUFFIXES = {".stl", ".3mf", ".obj", ".amf", ".step", ".stp"}
 _STEP_SUFFIXES = {".step", ".stp"}
 _GCODE_SUFFIXES = {".gcode", ".gco"}
 _OVERRIDE_KEY = re.compile(r"^[a-z][a-z0-9_]*$")
-# Flags the server sets itself, plus `save`, which would write into the user's PrusaSlicer data directory.
-# An override with one of these names would silently undo a guarantee (e.g. binary_gcode=1 beats our text G-code).
+# Flags the server sets itself, plus `save` (would write into the user's data directory) and
+# `post_process` (runs an external program after export). An override with one of these names
+# would silently undo a guarantee (e.g. binary_gcode=1 beats our text G-code).
 _RESERVED_OVERRIDES = frozenset(
     {
         "export_gcode",
@@ -78,6 +79,7 @@ _RESERVED_OVERRIDES = frozenset(
         "output",
         "datadir",
         "save",
+        "post_process",
         "center",
     }
 )
@@ -895,7 +897,7 @@ async def slice_model(
     overrides: Annotated[
         dict[str, str] | None,
         Field(
-            description="Optional PrusaSlicer settings, e.g. {'fill_density': '25%', 'perimeters': '3'}. Keys are config option names (see PrusaSlicer --help-fff); options the server sets itself (profiles, output, binary_gcode, datadir, save) are rejected."
+            description="Optional PrusaSlicer settings, e.g. {'fill_density': '25%', 'perimeters': '3'}. Keys are config option names (see PrusaSlicer --help-fff); options the server sets itself (profiles, output, binary_gcode, datadir, save, post_process) are rejected."
         ),
     ] = None,
     output_path: Annotated[
